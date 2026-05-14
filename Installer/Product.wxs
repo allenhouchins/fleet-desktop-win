@@ -90,22 +90,31 @@
                Bitness="always64">
       <File Id="FleetDesktopExeFile"
             Source="$(var.PublishDir)FleetDesktop.exe"
-            KeyPath="yes" />
+            KeyPath="yes">
+        <!-- Nest the Start Menu shortcut inside the File element so it lives in the
+             same component as its target (avoids ICE69 cross-component reference). -->
+        <Shortcut Id="StartMenuShortcutEntry"
+                  Directory="AppShortcutFolder"
+                  Name="Fleet Desktop"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Open the Fleet self-service portal"
+                  Advertise="no" />
+      </File>
     </Component>
 
     <Component Id="UrlSchemeRegistration"
                Directory="INSTALLFOLDER"
                Guid="C0F9B3E4-5D71-4E12-9A8D-1B22EE3B5F77"
                Bitness="always64">
-      <RegistryKey Root="HKMU" Key="Software\Classes\fleet">
+      <RegistryKey Root="HKLM" Key="Software\Classes\fleet">
         <RegistryValue Type="string" Value="URL:fleet Protocol" />
         <RegistryValue Name="URL Protocol" Type="string" Value="" />
       </RegistryKey>
-      <RegistryKey Root="HKMU" Key="Software\Classes\fleet\DefaultIcon">
-        <RegistryValue Type="string" Value="[#FleetDesktopExeFile],0" />
+      <RegistryKey Root="HKLM" Key="Software\Classes\fleet\DefaultIcon">
+        <RegistryValue Type="string" Value="[INSTALLFOLDER]FleetDesktop.exe,0" />
       </RegistryKey>
-      <RegistryKey Root="HKMU" Key="Software\Classes\fleet\shell\open\command">
-        <RegistryValue Type="string" Value="&quot;[#FleetDesktopExeFile]&quot; &quot;%1&quot;" />
+      <RegistryKey Root="HKLM" Key="Software\Classes\fleet\shell\open\command">
+        <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]FleetDesktop.exe&quot; &quot;%1&quot;" />
       </RegistryKey>
       <RegistryValue Root="HKLM"
                      Key="Software\FleetDM\FleetDesktop"
@@ -115,16 +124,14 @@
                      KeyPath="yes" />
     </Component>
 
+    <!-- Per-user data (Start Menu folder cleanup) needs a per-user (HKCU) keypath
+         for ICE57 to pass on a perMachine install. The shortcut itself is created
+         by the nested <Shortcut> inside FleetDesktopExe above. -->
     <Component Id="StartMenuShortcut"
                Directory="AppShortcutFolder"
                Guid="6B4D2A8E-91F2-4C0E-9C7A-93F8C4E1B201">
-      <Shortcut Id="StartMenuShortcutEntry"
-                Name="Fleet Desktop"
-                Target="[#FleetDesktopExeFile]"
-                WorkingDirectory="INSTALLFOLDER"
-                Description="Open the Fleet self-service portal" />
       <RemoveFolder Id="RemoveAppShortcutFolder" Directory="AppShortcutFolder" On="uninstall" />
-      <RegistryValue Root="HKMU"
+      <RegistryValue Root="HKCU"
                      Key="Software\FleetDM\FleetDesktop"
                      Name="StartMenuShortcut"
                      Type="integer"
