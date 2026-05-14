@@ -90,16 +90,7 @@
                Bitness="always64">
       <File Id="FleetDesktopExeFile"
             Source="$(var.PublishDir)FleetDesktop.exe"
-            KeyPath="yes">
-        <!-- Nest the Start Menu shortcut inside the File element so it lives in the
-             same component as its target (avoids ICE69 cross-component reference). -->
-        <Shortcut Id="StartMenuShortcutEntry"
-                  Directory="AppShortcutFolder"
-                  Name="Fleet Desktop"
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Open the Fleet self-service portal"
-                  Advertise="no" />
-      </File>
+            KeyPath="yes" />
     </Component>
 
     <Component Id="UrlSchemeRegistration"
@@ -124,12 +115,18 @@
                      KeyPath="yes" />
     </Component>
 
-    <!-- Per-user data (Start Menu folder cleanup) needs a per-user (HKCU) keypath
-         for ICE57 to pass on a perMachine install. The shortcut itself is created
-         by the nested <Shortcut> inside FleetDesktopExe above. -->
+    <!-- Per-user data (Start Menu folder + shortcut) with a per-user (HKCU) keypath.
+         The Target uses a literal [INSTALLFOLDER] path rather than [#FileId] to avoid
+         creating an ICE69 cross-component reference to FleetDesktopExe. -->
     <Component Id="StartMenuShortcut"
                Directory="AppShortcutFolder"
                Guid="6B4D2A8E-91F2-4C0E-9C7A-93F8C4E1B201">
+      <Shortcut Id="StartMenuShortcutEntry"
+                Name="Fleet Desktop"
+                Target="[INSTALLFOLDER]FleetDesktop.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Description="Open the Fleet self-service portal"
+                Advertise="no" />
       <RemoveFolder Id="RemoveAppShortcutFolder" Directory="AppShortcutFolder" On="uninstall" />
       <RegistryValue Root="HKCU"
                      Key="Software\FleetDM\FleetDesktop"
