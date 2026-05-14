@@ -23,8 +23,8 @@ This is the Windows companion to the [macOS version](https://github.com/allenhou
 - Windows 10 (version 1809 / build 17763) or newer — 64-bit
 - [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (pre-installed on Windows 11 and recent Windows 10 builds)
 - Fleet's orbit agent (fleetd) installed and enrolled
-- `C:\Program Files\Orbit\fleet_url.txt` must exist (orbit creates this on first run)
-- `C:\Program Files\Orbit\identifier` must exist (orbit creates this on enrollment)
+- `C:\Program Files\Orbit\bin\orbit\orbit.exe` (created by fleetd's MSI)
+- `C:\Program Files\Orbit\identifier` (created by orbit on enrollment, rotates hourly)
 
 ## Installation
 
@@ -34,7 +34,7 @@ This is the Windows companion to the [macOS version](https://github.com/allenhou
 2. Double-click the `.msi` file to run the installer
 3. Follow the installation wizard
 
-The installer requires fleetd to be installed first — it checks for `C:\Program Files\Orbit\fleet_url.txt` before proceeding. If that file is missing, the installer aborts with an error. The app is placed in `C:\Program Files\Fleet Desktop\`. On upgrades, the installer gracefully closes Fleet Desktop before installing.
+The installer requires fleetd to be installed first — it checks for `C:\Program Files\Orbit\bin\orbit\orbit.exe` before proceeding. If that file is missing, the installer aborts with an error. The app is placed in `C:\Program Files\Fleet Desktop\`. On upgrades, the installer gracefully closes Fleet Desktop before installing.
 
 ### Via Fleet (Software)
 
@@ -46,8 +46,8 @@ The MSI can be wrapped as a Win32 app and deployed via Intune. The installer's M
 
 ## How It Works
 
-1. **Reads the Fleet URL** from `C:\Program Files\Orbit\fleet_url.txt` (written by orbit on first enrollment)
-2. **Reads the device token** from `C:\Program Files\Orbit\identifier` (managed by orbit, rotates hourly)
+1. **Reads the Fleet URL** from the `Fleet osquery` Windows service's `ImagePath` registry value (parsed from the `--fleet-url` arg baked in by fleetd's MSI)
+2. **Reads the device token** from `<root-dir>\identifier` — `<root-dir>` is parsed from the same service args (`--root-dir`), defaulting to `C:\Program Files\Orbit\`
 3. **Opens the self-service portal** at `{FleetURL}/device/{token}/self-service` in an embedded WebView2 window
 
 ### Token Rotation
@@ -128,11 +128,12 @@ To run the app without building an MSI:
 dotnet run --project FleetDesktop\FleetDesktop.csproj
 ```
 
-The first run will fail unless fleetd is installed locally — that's expected. Set `ORBIT_ROOT_DIR` to point at a test directory if you want to develop without fleetd:
+The first run will fail unless fleetd is installed locally — that's expected. To develop without fleetd, set both env vars to point at a fake URL and a directory holding a fake `identifier` file:
 
 ```powershell
+$env:FLEET_URL = "https://fleet.example.com"
 $env:ORBIT_ROOT_DIR = "C:\dev\fake-orbit"
-# create fake-orbit\fleet_url.txt and fake-orbit\identifier
+# create fake-orbit\identifier with any non-empty string
 dotnet run --project FleetDesktop\FleetDesktop.csproj
 ```
 
@@ -140,16 +141,18 @@ dotnet run --project FleetDesktop\FleetDesktop.csproj
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ORBIT_ROOT_DIR` | `C:\Program Files\Orbit` | Override the orbit directory (changes where `identifier` and `fleet_url.txt` are read from) |
+| `FLEET_URL` | _(read from service registry)_ | Override the Fleet server URL (useful for local dev without fleetd) |
+| `ORBIT_ROOT_DIR` | _(read from service registry, falls back to `C:\Program Files\Orbit`)_ | Override the directory `identifier` is read from |
 
 ### Configuration sources
 
-| File | Purpose |
-|------|---------|
-| `C:\Program Files\Orbit\fleet_url.txt` | Fleet server URL (written by orbit on enrollment) |
-| `C:\Program Files\Orbit\identifier` | Device authentication token (rotates hourly) |
+| Source | Purpose |
+|--------|---------|
+| `HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery\ImagePath` (`--fleet-url`) | Fleet server URL — baked into the service args by fleetd's MSI |
+| `HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery\ImagePath` (`--root-dir`) | Orbit root directory — used to locate `identifier` |
+| `<root-dir>\identifier` | Device authentication token (rotates hourly) |
 
-> **Note:** Fleet Desktop requires fleetd to be installed and enrolled. The MSI refuses to install if `fleet_url.txt` is missing.
+> **Note:** Fleet Desktop requires fleetd to be installed and enrolled. The MSI refuses to install if `C:\Program Files\Orbit\bin\orbit\orbit.exe` is missing.
 
 ### URL scheme
 

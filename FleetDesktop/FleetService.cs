@@ -3,10 +3,12 @@ using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace FleetDesktop;
 
@@ -40,7 +42,7 @@ internal sealed class FleetService : IDisposable
     private readonly object _stateLock = new();
     private readonly string _orbitRoot;
     private readonly string _tokenFile;
-    private readonly string _fleetUrlFile;
+    private readonly string? _fleetUrlFromService;
 
     private MainWindow? _browserWindow;
     private DispatcherTimer? _refreshTimer;
@@ -60,26 +62,78 @@ internal sealed class FleetService : IDisposable
 
     public FleetService()
     {
-        _orbitRoot = ResolveOrbitRoot();
+        // On Windows, the Fleet URL and root-dir live as command-line arguments
+        // baked into the "Fleet osquery" service's ImagePath registry value by
+        // fleetd's own WiX installer. (Unlike macOS, there's no fleet_url.txt —
+        // that file is written only on darwin from an Apple config profile.)
+        var serviceArgs = ReadOrbitServiceArgs();
+        _fleetUrlFromService = serviceArgs != null ? ExtractArg(serviceArgs, "fleet-url") : null;
+
+        _orbitRoot = ResolveOrbitRoot(serviceArgs);
         _tokenFile = Path.Combine(_orbitRoot, "identifier");
-        _fleetUrlFile = Path.Combine(_orbitRoot, "fleet_url.txt");
     }
 
-    private static string ResolveOrbitRoot()
+    private static string ResolveOrbitRoot(string? serviceArgs)
     {
         var fromEnv = Environment.GetEnvironmentVariable("ORBIT_ROOT_DIR");
         if (!string.IsNullOrWhiteSpace(fromEnv))
         {
             return fromEnv.Trim();
         }
-        // Default Windows orbit install path. Matches:
-        // fleet/orbit/pkg/update/options_windows_amd64.go → C:\Program Files\Orbit
+        if (serviceArgs != null)
+        {
+            var fromService = ExtractArg(serviceArgs, "root-dir");
+            if (!string.IsNullOrWhiteSpace(fromService))
+            {
+                // fleetd's WiX template uses [ORBITROOT]. → trailing "\." which Path.Combine
+                // tolerates, but trim it so error messages show a clean path.
+                return fromService.TrimEnd('.', '\\', '/').TrimEnd('\\', '/');
+            }
+        }
+        // Last-resort default install path.
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         if (string.IsNullOrEmpty(programFiles))
         {
             programFiles = @"C:\Program Files";
         }
         return Path.Combine(programFiles, "Orbit");
+    }
+
+    /// <summary>
+    /// Reads HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery\ImagePath.
+    /// Returns the full command line (exe path + args) or null if the service
+    /// isn't installed / can't be read.
+    /// </summary>
+    private static string? ReadOrbitServiceArgs()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Services\Fleet osquery");
+            // GetValue with DoNotExpandEnvironmentNames preserves any %VAR% tokens; the
+            // ImagePath for fleetd is typically a plain string but be safe.
+            return key?.GetValue("ImagePath", null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Extracts a "--name" argument value from a command-line string. Supports both
+    /// quoted (--name "value") and unquoted (--name value, --name=value) forms.
+    /// </summary>
+    private static string? ExtractArg(string commandLine, string name)
+    {
+        var escaped = Regex.Escape(name);
+        // --name "value with spaces"
+        var quoted = Regex.Match(commandLine, $@"--{escaped}[=\s]+""([^""]+)""");
+        if (quoted.Success) return quoted.Groups[1].Value;
+        // --name value-without-spaces  or  --name=value
+        var bare = Regex.Match(commandLine, $@"--{escaped}[=\s]+(\S+)");
+        return bare.Success ? bare.Groups[1].Value : null;
     }
 
     // ---- Public entry points -------------------------------------------------
@@ -277,7 +331,9 @@ internal sealed class FleetService : IDisposable
         {
             ShowFatalError(
                 "Fleet Desktop could not find the Fleet server URL.\n\n" +
-                $"Expected file: {_fleetUrlFile}\n\n" +
+                "Expected to read it from the \"Fleet osquery\" Windows service " +
+                "(HKLM\\SYSTEM\\CurrentControlSet\\Services\\Fleet osquery\\ImagePath, " +
+                "--fleet-url argument).\n\n" +
                 "Ensure the Fleet orbit agent (fleetd) is installed and enrolled on this machine. " +
                 "Contact your administrator if the problem persists.");
             return false;
@@ -489,9 +545,20 @@ internal sealed class FleetService : IDisposable
         }
     }
 
-    // ---- File reading --------------------------------------------------------
+    // ---- Config / file reading ----------------------------------------------
 
-    private string? ReadFleetUrl() => ReadFileTrimmed(_fleetUrlFile);
+    /// <summary>
+    /// Returns the Fleet server URL. Prefers the FLEET_URL env var (useful for
+    /// local testing) and falls back to the value parsed from the "Fleet osquery"
+    /// service's ImagePath in the registry.
+    /// </summary>
+    private string? ReadFleetUrl()
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("FLEET_URL");
+        if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv.Trim();
+        return string.IsNullOrWhiteSpace(_fleetUrlFromService) ? null : _fleetUrlFromService;
+    }
+
     private string? ReadToken() => ReadFileTrimmed(_tokenFile);
 
     private static string? ReadFileTrimmed(string path)

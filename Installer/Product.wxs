@@ -7,8 +7,9 @@
     Fleet Desktop installer. Mirrors the macOS .pkg:
 
       * Refuses to install if Fleet's orbit agent isn't present
-        (we look for C:\Program Files\Orbit\fleet_url.txt — orbit writes this
-        on first run, so its presence is our equivalent of the macOS MDM check).
+        (we look for C:\Program Files\Orbit\bin\orbit\orbit.exe — installed
+        by fleetd's own MSI, so its presence is our equivalent of the
+        macOS MDM check).
       * Installs FleetDesktop.exe (self-contained single-file) to
         %ProgramFiles%\Fleet Desktop\.
       * Registers the fleet:// URL scheme machine-wide.
@@ -34,22 +35,28 @@
 
     <!-- ===================================================================
          Orbit-presence check.
-         Looks for C:\Program Files\Orbit\fleet_url.txt and sets the
-         ORBITFLEETURLFILE property to the file path if it exists.
-         The launch condition refuses to install if the property is empty.
+         Looks for C:\Program Files\Orbit\bin\orbit\orbit.exe — the binary
+         installed by Fleet's own fleetd MSI. ORBITEXEFILE is set to the
+         resolved path if found; the launch condition fails if it's empty.
+         (Note: fleet_url.txt is macOS-only, written from an Apple config
+         profile — it never exists on Windows, so we can't key off that.)
          ================================================================== -->
-    <Property Id="ORBITFLEETURLFILE">
+    <Property Id="ORBITEXEFILE">
       <DirectorySearch Id="ProgramFilesDir"
                        Path="[ProgramFiles64Folder]"
                        Depth="0">
         <DirectorySearch Id="OrbitDir" Path="Orbit" Depth="0">
-          <FileSearch Id="FleetUrlFile" Name="fleet_url.txt" />
+          <DirectorySearch Id="OrbitBinDir" Path="bin" Depth="0">
+            <DirectorySearch Id="OrbitBinOrbitDir" Path="orbit" Depth="0">
+              <FileSearch Id="OrbitExeFile" Name="orbit.exe" />
+            </DirectorySearch>
+          </DirectorySearch>
         </DirectorySearch>
       </DirectorySearch>
     </Property>
 
     <Launch
-        Condition="ORBITFLEETURLFILE OR Installed"
+        Condition="ORBITEXEFILE OR Installed"
         Message="Fleet Desktop requires Fleet's orbit agent (fleetd) to be installed and enrolled on this machine. Please install fleetd via your MDM (Intune, etc.) before installing Fleet Desktop." />
 
     <Launch
