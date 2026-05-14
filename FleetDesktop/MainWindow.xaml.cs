@@ -66,6 +66,7 @@ public partial class MainWindow : Window
     private bool _coreReady;
     private bool _ssoFlowActive;
     private int? _pendingStatusCode;
+    private string? _pendingNavigationUri;
 
     public MainWindow()
     {
@@ -186,6 +187,10 @@ public partial class MainWindow : Window
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
+        // Track the top-level navigation target so OnWebResourceResponseReceived can match
+        // the main-document response (WebView2 doesn't surface ResourceContext on that event).
+        _pendingNavigationUri = e.Uri;
+
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) return;
         var scheme = uri.Scheme?.ToLowerInvariant() ?? "";
 
@@ -262,8 +267,11 @@ public partial class MainWindow : Window
         try
         {
             if (e.Request?.Method != "GET") return;
-            if (string.IsNullOrEmpty(e.Request.Uri)) return;
-            if (e.ResourceContext != CoreWebView2WebResourceContext.Document) return;
+            var uri = e.Request?.Uri;
+            if (string.IsNullOrEmpty(uri)) return;
+            // Filter to the main document: match the URI against the pending top-level navigation.
+            // Subresources (CSS/JS/images) have different URIs so they're filtered out automatically.
+            if (!string.Equals(uri, _pendingNavigationUri, StringComparison.Ordinal)) return;
             _pendingStatusCode = e.Response?.StatusCode;
         }
         catch
