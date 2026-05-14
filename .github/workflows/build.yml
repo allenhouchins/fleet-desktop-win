@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build MSI
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.wixproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Build MSI
+        id: build
+        shell: pwsh
+        run: .\build.ps1 -Configuration Release
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-desktop-msi-v${{ steps.build.outputs.VERSION }}
+          path: ${{ steps.build.outputs.MSI_PATH }}
+          if-no-files-found: error
+          retention-days: 30
