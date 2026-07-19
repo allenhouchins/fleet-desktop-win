@@ -71,14 +71,28 @@ if ($env:AZURE_TS_ENDPOINT -and $env:AZURE_TS_ACCOUNT -and $env:AZURE_TS_PROFILE
     } | ConvertTo-Json
     $metadata | Out-File -FilePath $MetadataPath -Encoding utf8
 
-    # Install the dlib if missing.
-    $DlibPath = Join-Path $env:USERPROFILE ".azuretrustedsigning\Microsoft.Trusted.Signing.Client.dll"
+    # Install the Trusted Signing client if missing. The version AND package
+    # hash are pinned so a compromised or breaking upstream release can't
+    # silently change what loads into the signing pipeline. The dlib
+    # (Azure.CodeSigning.Dlib.dll) must stay next to its sibling DLLs from
+    # bin\x64, so the whole package is kept extracted.
+    $TrustedSigningClientVersion = "1.0.95"
+    $TrustedSigningClientSha256 = "3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F"
+    $ClientDir = Join-Path $env:USERPROFILE ".azuretrustedsigning\$TrustedSigningClientVersion"
+    $DlibPath = Join-Path $ClientDir "bin\x64\Azure.CodeSigning.Dlib.dll"
     if (-not (Test-Path $DlibPath)) {
-        Write-Host "    Installing Trusted Signing dlib..." -ForegroundColor DarkCyan
-        New-Item -ItemType Directory -Path (Split-Path $DlibPath) -Force | Out-Null
-        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client" -OutFile "$env:TEMP\ats-client.zip"
-        Expand-Archive -Path "$env:TEMP\ats-client.zip" -DestinationPath "$env:TEMP\ats-client" -Force
-        Copy-Item -Path "$env:TEMP\ats-client\bin\x64\Microsoft.Trusted.Signing.Client.dll" -Destination $DlibPath -Force
+        Write-Host "    Installing Trusted Signing client $TrustedSigningClientVersion..." -ForegroundColor DarkCyan
+        $ZipPath = Join-Path $env:TEMP "ats-client.zip"
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client/$TrustedSigningClientVersion" -OutFile $ZipPath
+        $ActualHash = (Get-FileHash $ZipPath -Algorithm SHA256).Hash
+        if ($ActualHash -ne $TrustedSigningClientSha256) {
+            Remove-Item $ZipPath -ErrorAction SilentlyContinue
+            throw "Trusted Signing client download hash mismatch: expected $TrustedSigningClientSha256, got $ActualHash"
+        }
+        New-Item -ItemType Directory -Path $ClientDir -Force | Out-Null
+        Expand-Archive -Path $ZipPath -DestinationPath $ClientDir -Force
+        Remove-Item $ZipPath -ErrorAction SilentlyContinue
+        if (-not (Test-Path $DlibPath)) { throw "Trusted Signing client package did not contain $DlibPath" }
     }
 
     $SignTool = Find-SignTool

@@ -13,8 +13,8 @@ This is the Windows companion to the [macOS version](https://github.com/allenhou
 - **Loading screen** with Fleet logo while the portal loads
 - **File download support** — downloads save to the user's Downloads folder
 - **Light/dark mode** respects the user's system appearance
-- **`fleet://` URL scheme** for deep linking to Self-service, Policies, Software, and triggering refetches
-- **Taskbar overlay badge** showing failing policy count (Windows equivalent of the macOS Dock badge)
+- **`fleet://` URL scheme** for deep linking to Self-service, Policies, Software, triggering refetches, and one-click "Update all" / "Install all" flows
+- **Taskbar overlay badge** showing failing policy count (Windows equivalent of the macOS Dock badge); the page auto-reloads on reopen if the count changed while the window was closed
 - **fleetd required** — both the app and installer require Fleet's orbit agent to be installed and enrolled
 - **Authenticode-signed MSI installer** for secure enterprise distribution
 
@@ -66,10 +66,14 @@ The macOS app auto-opens `.mobileconfig` MDM profiles; Windows doesn't have an e
 
 ### Security
 
-- Only HTTPS connections allowed for the Fleet server
+- The Fleet server URL must use HTTPS — the app refuses to start with a cleartext `http://` URL rather than send the device token over the wire unencrypted
+- Device tokens are validated (alphanumerics plus `-`/`_` only) so path separators and URL metacharacters can never reach a constructed URL, and are URL-encoded on top of that
+- SSO flows are pinned to the current identity-provider host: hops to a new host are only allowed via server redirects or scripted navigations (multi-host IdP chains still work), user link clicks to unrelated hosts open in the default browser, and flows expire after 10 minutes
 - External links restricted to `https`, `http`, and `mailto` schemes
-- Device tokens are URL-encoded and not exposed in error messages
-- WebView2 uses a per-launch user data folder (no cookies or cache persist between sessions)
+- Downloads keep only the final path component of the server-supplied filename and always land in the user's Downloads folder
+- The `FLEET_URL` environment-variable override is compiled out of Release builds — a user-writable env var can't redirect the device token to another host
+- WebView2 uses a per-launch user data folder with password autosave and autofill disabled (no cookies or cache persist between sessions); stale folders from earlier launches are swept on startup
+- The single-instance named pipe is scoped to the current user's SID and restricted with `PipeOptions.CurrentUserOnly`, so other local users can't connect to or squat it
 - Mutable state protected by a lock for thread safety
 - The fleet:// URL scheme handler is registered machine-wide via the MSI
 
@@ -97,8 +101,8 @@ fleet-desktop-win/
 ├── build.ps1                    # Local build script
 ├── sign.ps1                     # Authenticode signing (PFX or Azure Trusted Signing)
 └── .github/workflows/
-    ├── build.yml                # CI: build + sign + upload artifact
-    └── build-and-release.yml    # Manual trigger: builds and creates a GitHub Release
+    ├── build.yml                # CI compile check: unsigned MSI artifact, no secrets
+    └── build-and-release.yml    # Tag push / manual: signs and creates a GitHub Release
 ```
 
 ### Building locally
@@ -141,7 +145,7 @@ dotnet run --project FleetDesktop\FleetDesktop.csproj
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FLEET_URL` | _(read from service registry)_ | Override the Fleet server URL (useful for local dev without fleetd) |
+| `FLEET_URL` | _(read from service registry)_ | Override the Fleet server URL. **Debug builds only** — the override is compiled out of Release builds so a user-writable env var can't redirect the device token |
 | `ORBIT_ROOT_DIR` | _(read from service registry, falls back to `C:\Program Files\Orbit`)_ | Override the directory `identifier` is read from |
 
 ### Configuration sources
@@ -164,7 +168,12 @@ The MSI registers the `fleet://` URL scheme machine-wide. Other tools and script
 | `fleet://software` | Opens the Software tab |
 | `fleet://policies` | Opens the Policies tab |
 | `fleet://refetch` | Triggers a device refetch and opens the app |
+| `fleet://update_all` | Opens Self-service and clicks its "Update all" button |
+| `fleet://install_all` | Opens Self-service and clicks its "Install all" button — Fleet's confirmation modal still requires the user to confirm |
+| `fleet://install_all?category_id=3` | Same, but filters Self-service to that category first so the install is scoped to it |
 | `fleet://anything-else` | Brings the app to the foreground |
+
+The dash forms `fleet://update-all` and `fleet://install-all` are also accepted.
 
 Example usage from a script:
 
@@ -186,18 +195,18 @@ There are two GitHub Actions workflows:
 
 ### Build (`.github/workflows/build.yml`)
 
-Runs on every push to `main` and on pull requests (doc-only changes are skipped).
+Runs on every push to `main` and on pull requests (doc-only changes are skipped). This is a compile-and-package check only — it uses **no secrets**, so it also passes on pull requests from forks:
 
 1. Restores .NET dependencies (the WiX toolset comes with the wixproj's PackageReferences)
 2. Publishes a self-contained, single-file EXE
-3. Signs the EXE (if signing secrets are present)
-4. Builds the MSI
-5. Signs the MSI (if signing secrets are present)
-6. Uploads the signed MSI as a workflow artifact (retained for 30 days)
+3. Builds the MSI
+4. Uploads the **unsigned** MSI as a workflow artifact (retained for 30 days)
 
 ### Build and Release (`.github/workflows/build-and-release.yml`)
 
-Manually triggered via `workflow_dispatch`. Performs all the same steps as the Build workflow, then creates a GitHub Release with the MSI attached.
+Triggered by pushing a `v*` tag or manually via `workflow_dispatch`. Signing credentials are injected only here: the EXE and MSI are Authenticode-signed (if secrets are configured), then a GitHub Release is created with the MSI attached.
+
+All third-party GitHub Actions in both workflows are pinned to commit SHAs (tags kept as comments) so a moved tag upstream can't silently change what runs in CI.
 
 ### Releasing a new version
 

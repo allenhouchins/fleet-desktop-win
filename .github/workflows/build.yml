@@ -3,26 +3,38 @@ name: Build
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "LICENSE"
+      - ".gitignore"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "LICENSE"
+      - ".gitignore"
   workflow_dispatch:
 
+# Compile-and-package check only — no signing secrets, so it works on pull
+# requests from forks. Signing happens in build-and-release.yml.
 jobs:
   build:
     name: Build MSI
     runs-on: windows-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.nuget/packages
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.wixproj') }}
@@ -35,9 +47,9 @@ jobs:
         run: .\build.ps1 -Configuration Release
 
       - name: Upload MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fleet-desktop-msi-v${{ steps.build.outputs.VERSION }}
+          name: fleet-desktop-msi-unsigned-v${{ steps.build.outputs.VERSION }}
           path: ${{ steps.build.outputs.MSI_PATH }}
           if-no-files-found: error
           retention-days: 30

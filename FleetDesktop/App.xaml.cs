@@ -29,18 +29,34 @@ public partial class App : Application
         var (initialUrl, hidden) = ParseArgs(e.Args);
         LaunchedHidden = hidden;
 
-        _singleInstance = new SingleInstance("FleetDesktop.Singleton.v1");
-        if (!_singleInstance.AcquireOrForward(initialUrl))
+        // v2: the pipe name gained a per-user SID suffix and the protocol gained
+        // the "reopen" message. Versioning the channel name keeps a leftover
+        // pre-upgrade instance from owning the mutex while newer binaries forward
+        // messages to a pipe nobody is listening on.
+        _singleInstance = new SingleInstance("FleetDesktop.Singleton.v2");
+        if (!_singleInstance.AcquireOrForward(initialUrl, requestReopenIfNoUrl: !hidden))
         {
-            // Another instance is running; we've forwarded the URL to it. Exit quietly.
+            // Another instance is running; we've forwarded the URL (or a reopen
+            // request) to it. Exit quietly.
             Shutdown(0);
             return;
         }
 
-        _singleInstance.OnUrlReceived += url =>
+        _singleInstance.OnMessageReceived += message =>
         {
             // Forwarded from a second-instance launch — dispatch on the UI thread.
-            Dispatcher.BeginInvoke(() => _fleetService?.HandleFleetUrl(url));
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (message == SingleInstance.ReopenMessage)
+                {
+                    // Plain relaunch (Start Menu, taskbar) with no URL: show the window.
+                    _fleetService?.ShowWindow();
+                }
+                else
+                {
+                    _fleetService?.HandleFleetUrl(message);
+                }
+            });
         };
 
         _fleetService = new FleetService();
