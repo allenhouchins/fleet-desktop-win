@@ -41,14 +41,11 @@ $ExePath = Join-Path $PublishDir "FleetDesktop.exe"
 if (-not (Test-Path $ExePath)) { throw "Expected $ExePath to exist after publish" }
 Write-Host "    EXE: $ExePath" -ForegroundColor Green
 
-# 2) Optionally sign the EXE before packaging.
-if ($env:WINDOWS_PFX_BASE64 -and $env:WINDOWS_PFX_PASSWORD) {
-    Write-Host "==> Signing FleetDesktop.exe (PFX from env)..." -ForegroundColor Cyan
-    & "$RepoRoot\sign.ps1" -Path $ExePath
-    if ($LASTEXITCODE -ne 0) { throw "Signing failed" }
-} else {
-    Write-Host "    (skipping EXE signing — no WINDOWS_PFX_BASE64 / WINDOWS_PFX_PASSWORD set)" -ForegroundColor Yellow
-}
+# 2) Sign the EXE before packaging. sign.ps1 picks Azure Trusted Signing or PFX
+#    from the environment and no-ops (exit 0) when neither is configured.
+Write-Host "==> Signing FleetDesktop.exe..." -ForegroundColor Cyan
+& "$RepoRoot\sign.ps1" -Path $ExePath
+if ($LASTEXITCODE -ne 0) { throw "Signing failed" }
 
 if ($SkipMsi) {
     Write-Host "==> Skipping MSI build (--SkipMsi). Done." -ForegroundColor Green
@@ -71,14 +68,10 @@ if (-not (Test-Path $MsiPath)) {
 if (-not (Test-Path $MsiPath)) { throw "MSI build succeeded but expected output file was not found" }
 Write-Host "    MSI: $MsiPath" -ForegroundColor Green
 
-# 4) Optionally sign the MSI.
-if ($env:WINDOWS_PFX_BASE64 -and $env:WINDOWS_PFX_PASSWORD) {
-    Write-Host "==> Signing MSI..." -ForegroundColor Cyan
-    & "$RepoRoot\sign.ps1" -Path $MsiPath
-    if ($LASTEXITCODE -ne 0) { throw "Signing failed" }
-} else {
-    Write-Host "    (skipping MSI signing — no WINDOWS_PFX_BASE64 / WINDOWS_PFX_PASSWORD set)" -ForegroundColor Yellow
-}
+# 4) Sign the MSI (same credential detection as step 2).
+Write-Host "==> Signing MSI..." -ForegroundColor Cyan
+& "$RepoRoot\sign.ps1" -Path $MsiPath
+if ($LASTEXITCODE -ne 0) { throw "Signing failed" }
 
 Write-Host ""
 Write-Host "==> Done." -ForegroundColor Green

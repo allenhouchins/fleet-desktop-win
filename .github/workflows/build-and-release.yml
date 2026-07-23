@@ -27,28 +27,41 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.nuget/packages
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.wixproj') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Build MSI
+      # Signing credentials live only in this workflow — the per-push Build
+      # workflow compiles without secrets so it stays fork-safe. sign.ps1
+      # auto-detects Azure Trusted Signing first, then PFX; with neither
+      # configured the MSI is released unsigned.
+      - name: Build and sign MSI
         id: build
         shell: pwsh
+        env:
+          AZURE_TS_ENDPOINT: ${{ secrets.AZURE_TS_ENDPOINT }}
+          AZURE_TS_ACCOUNT: ${{ secrets.AZURE_TS_ACCOUNT }}
+          AZURE_TS_PROFILE: ${{ secrets.AZURE_TS_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: .\build.ps1 -Configuration Release
 
       - name: Upload MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fleet-desktop-msi-v${{ steps.build.outputs.VERSION }}
           path: ${{ steps.build.outputs.MSI_PATH }}
