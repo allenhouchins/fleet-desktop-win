@@ -1,11 +1,15 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Win32;
 
 namespace FleetDesktop;
 
@@ -17,7 +21,8 @@ namespace FleetDesktop;
 ///   w.Preload(uri);   // starts loading without showing the window
 ///   w.Show();         // brings the window forward (loading overlay shown until page loads)
 ///
-/// The WebView is kept alive between Show()/Hide() calls so reopening is instant.
+/// The WebView is kept alive between Show()/Hide() calls so reopening is instant;
+/// while hidden it is suspended so an idle Fleet Desktop costs no CPU and little memory.
 /// </summary>
 public partial class MainWindow : Window
 {
@@ -30,10 +35,36 @@ public partial class MainWindow : Window
         "https", "http", "mailto",
     };
 
+    /// <summary>
+    /// URL schemes of native authenticator apps an IdP launches mid-flow. Okta Verify
+    /// registers <c>com-okta-authenticator</c>; Okta's sign-in page navigates to it
+    /// (from a hidden iframe) for FastPass when its localhost loopback probe fails,
+    /// then polls Okta for the app's answer.
+    /// </summary>
+    private static readonly HashSet<string> AuthenticatorSchemes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "com-okta-authenticator",
+    };
+
+    /// <summary>Follows no redirects: used to read the transparency endpoint's
+    /// <c>Location</c> header instead of following it.</summary>
+    private static readonly HttpClient NoRedirectHttp = new(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(30),
+    };
+
+    /// <summary>How long after the window is hidden the WebView is put to sleep. Long
+    /// enough that a close-and-reopen doesn't pay a resume.</summary>
+    private static readonly TimeSpan SuspendDelay = TimeSpan.FromSeconds(5);
+
     /// <summary>Raised when a navigation error occurs (network or expired-token error page).</summary>
     public event Action? NavigationError;
 
-    /// <summary>Raised the first time the window is shown (used to kick a token refresh).</summary>
+    /// <summary>Raised each time the window is shown (used to kick a token refresh).</summary>
     public event Action? WindowShown;
 
     private string? _fleetHost;
@@ -41,6 +72,7 @@ public partial class MainWindow : Window
     private bool _coreReady;
     private int? _pendingStatusCode;
     private string? _pendingNavigationUri;
+    private readonly DispatcherTimer _suspendTimer;
 
     /// <summary>JavaScript to run the next time a Fleet-host page finishes loading. Consumed once.
     /// Used by fleet://update_all and fleet://install_all to click in-page buttons.</summary>
@@ -92,6 +124,17 @@ public partial class MainWindow : Window
         CommandBindings.Add(new CommandBinding(NavigationCommands.Refresh, (_, _) => ReloadCurrent()));
         InputBindings.Add(new KeyBinding(NavigationCommands.Refresh, Key.F5, ModifierKeys.None));
         InputBindings.Add(new KeyBinding(NavigationCommands.Refresh, Key.R, ModifierKeys.Control));
+
+        _suspendTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = SuspendDelay };
+        _suspendTimer.Tick += (_, _) =>
+        {
+            _suspendTimer.Stop();
+            _ = SuspendIfHiddenAsync();
+        };
+
+        WindowPlacement.Restore(this);
+        ApplyTheme(WindowsTheme.IsDarkMode());
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
     }
 
     /// <summary>Start loading the URL in the WebView without showing the window.</summary>
@@ -99,6 +142,10 @@ public partial class MainWindow : Window
     {
         _fleetHost = url.Host;
         _homeUrl = url;
+        // WebView2 needs a parent HWND before it can initialize. Creating the handle
+        // now (without showing the window) is what lets a hidden launch preload the
+        // page, so the first Show is instant.
+        new WindowInteropHelper(this).EnsureHandle();
         _ = InitializeWebViewAsync();
     }
 
@@ -107,6 +154,7 @@ public partial class MainWindow : Window
     {
         if (_coreReady)
         {
+            EnsureResumed();
             WebView.CoreWebView2.Reload();
         }
     }
@@ -118,7 +166,8 @@ public partial class MainWindow : Window
         _homeUrl = url;
         if (_coreReady)
         {
-            WebView.CoreWebView2.Navigate(url.ToString());
+            EnsureResumed();
+            WebView.CoreWebView2.Navigate(url.AbsoluteUri);
         }
         // else: InitializeWebViewAsync navigates to the latest _homeUrl once the
         // core is up, so a Reload during initialization is not lost.
@@ -156,6 +205,16 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Persists the window's position and size for the next launch.</summary>
+    public void SavePlacement()
+    {
+        // Nothing to save until the window has been laid out at least once.
+        if (ActualWidth > 0 && ActualHeight > 0)
+        {
+            WindowPlacement.Save(this);
+        }
+    }
+
     // ---- WebView2 init -------------------------------------------------------
 
     private async Task InitializeWebViewAsync()
@@ -164,16 +223,7 @@ public partial class MainWindow : Window
         {
             // Per-launch user data folder under %LOCALAPPDATA% so cookies/cache
             // don't persist between sessions (mirrors WKWebView .nonPersistent()).
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var webViewRoot = Path.Combine(localAppData, "FleetDesktop", "WebView2");
-            var userDataFolder = Path.Combine(webViewRoot, Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(userDataFolder);
-
-            // Earlier launches leave their per-launch folders behind (the browser
-            // process holds them until it exits, so they can't be deleted on
-            // shutdown). Sweep stale siblings in the background; folders still in
-            // use simply fail to delete and are skipped.
-            _ = Task.Run(() => CleanupStaleUserDataFolders(webViewRoot, userDataFolder));
+            var userDataFolder = WebViewProfiles.CreateUserDataFolder("WebView2");
 
             var env = await CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
@@ -188,6 +238,8 @@ public partial class MainWindow : Window
             core.Settings.AreHostObjectsAllowed = false;
             core.Settings.IsScriptEnabled = true;
             core.Settings.IsBuiltInErrorPageEnabled = true;
+            // Nothing listens for web messages in this window; close the channel.
+            core.Settings.IsWebMessageEnabled = false;
             // The profile is throwaway — never offer to save passwords or autofill data.
             core.Settings.IsPasswordAutosaveEnabled = false;
             core.Settings.IsGeneralAutofillEnabled = false;
@@ -204,7 +256,7 @@ public partial class MainWindow : Window
             // arrived during startup).
             if (_homeUrl != null)
             {
-                core.Navigate(_homeUrl.ToString());
+                core.Navigate(_homeUrl.AbsoluteUri);
             }
         }
         catch (Exception ex)
@@ -226,7 +278,7 @@ public partial class MainWindow : Window
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
         // Track the top-level navigation target so OnWebResourceResponseReceived can match
-        // the main-document response (WebView2 doesn't surface ResourceContext on that event).
+        // the main-document response on runtimes that don't report HttpStatusCode.
         _pendingNavigationUri = e.Uri;
 
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri))
@@ -236,8 +288,20 @@ public partial class MainWindow : Window
         }
         var scheme = uri.Scheme?.ToLowerInvariant() ?? "";
 
-        // Same-host navigations and about: are always allowed.
-        if (IsFleetHost(uri.Host)) return;
+        if (IsTransparencyEndpoint(uri))
+        {
+            e.Cancel = true;
+            OpenTransparencyPage(uri);
+            return;
+        }
+
+        // Same-host navigations are always allowed — over HTTPS. The device token is
+        // in the URL, so a downgrade to cleartext on the Fleet host is refused.
+        if (IsFleetHost(uri.Host))
+        {
+            if (scheme != "https") e.Cancel = true;
+            return;
+        }
         if (scheme == "about") return;
 
         // During an active SSO flow, keep external IdP redirects in the WebView so
@@ -249,6 +313,11 @@ public partial class MainWindow : Window
         // to arbitrary sites.
         if (SsoFlowActive)
         {
+            if (TryLaunchAuthenticator(uri))
+            {
+                e.Cancel = true;
+                return;
+            }
             if (scheme != "https" || SsoFlowExpired)
             {
                 // Flow over (expired or degraded to non-HTTPS). Don't just cancel —
@@ -305,17 +374,20 @@ public partial class MainWindow : Window
     {
         if (_coreReady && _homeUrl != null)
         {
-            WebView.CoreWebView2.Navigate(_homeUrl.ToString());
+            WebView.CoreWebView2.Navigate(_homeUrl.AbsoluteUri);
         }
     }
 
     private async void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
-        var status = _pendingStatusCode;
+        var status = TryGetHttpStatus(e) ?? _pendingStatusCode;
         _pendingStatusCode = null;
 
         if (!e.IsSuccess)
         {
+            // Cancelled loads are our own policy decisions (external links, refused
+            // schemes), not failures.
+            if (e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled) return;
             ResetSsoFlow();
             NavigationError?.Invoke();
             return;
@@ -362,6 +434,20 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Main-document HTTP status, on runtimes new enough to report it (112+).</summary>
+    private static int? TryGetHttpStatus(CoreWebView2NavigationCompletedEventArgs e)
+    {
+        try
+        {
+            var status = e.HttpStatusCode;
+            return status > 0 ? status : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>Host of the document currently loaded in the WebView, or null.</summary>
     private string? GetCurrentHost()
     {
@@ -370,7 +456,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Captures HTTP status codes for the top-level document so we can detect 401/403 on token expiry.
+    /// Captures HTTP status codes for the top-level document so we can detect 401/403 on
+    /// token expiry with runtimes that predate NavigationCompleted.HttpStatusCode.
     /// </summary>
     private void OnWebResourceResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
     {
@@ -396,16 +483,12 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task CheckPageForErrorsAsync()
     {
-        const string js = @"
+        var js = $$"""
             (function() {
-                var body = document.body ? document.body.innerText : '';
-                var errors = 0;
-                if (body.indexOf('Something went wrong') !== -1) errors++;
-                if (body.indexOf('Error loading software') !== -1) errors++;
-                if (body.indexOf('Please contact your IT admin') !== -1) errors++;
-                return errors >= 2 ? 'error' : 'ok';
+                var text = document.body ? document.body.innerText : '';
+                return {{FleetErrorPage.MatchesExpression}} ? 'error' : 'ok';
             })();
-        ";
+            """;
         try
         {
             var result = await WebView.CoreWebView2.ExecuteScriptAsync(js);
@@ -422,16 +505,22 @@ public partial class MainWindow : Window
 
     private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
-        // target="_blank" / window.open: route same-host (or the current SSO host,
-        // while the flow is fresh) to this view, everything else to the default browser.
+        // target="_blank" / window.open: the transparency link resolves natively;
+        // same-host (or the current SSO host, while the flow is fresh) loads in this
+        // view; an authenticator app gets its scheme; everything else goes to the
+        // default browser.
         e.Handled = true;
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) return;
-        if (IsFleetHost(uri.Host) ||
-            (SsoFlowActive && !SsoFlowExpired && IsCurrentSsoHost(uri.Host)))
+        if (IsTransparencyEndpoint(uri))
         {
-            WebView.CoreWebView2.Navigate(uri.ToString());
+            OpenTransparencyPage(uri);
         }
-        else
+        else if (IsFleetHost(uri.Host) ||
+                 (SsoFlowActive && !SsoFlowExpired && IsCurrentSsoHost(uri.Host)))
+        {
+            WebView.CoreWebView2.Navigate(uri.AbsoluteUri);
+        }
+        else if (!TryLaunchAuthenticator(uri))
         {
             OpenExternal(uri);
         }
@@ -453,7 +542,7 @@ public partial class MainWindow : Window
             }
 
             var fileName = Path.GetFileName(e.ResultFilePath);
-            if (string.IsNullOrEmpty(fileName))
+            if (string.IsNullOrEmpty(fileName) || fileName is "." or "..")
             {
                 fileName = "download";
             }
@@ -477,17 +566,98 @@ public partial class MainWindow : Window
         }
     }
 
+    // ---- Transparency link ------------------------------------------------------
+
+    /// <summary>
+    /// Whether the URL is Fleet's device transparency endpoint
+    /// (<c>&lt;prefix&gt;/api/&lt;version&gt;/fleet/device/&lt;token&gt;/transparency</c>),
+    /// which redirects to the admin-configured transparency page. Loaded in the
+    /// WebView, that redirect off the Fleet host looks like the start of an SSO
+    /// flow, so the external page would render in-app with no way back.
+    /// </summary>
+    private bool IsTransparencyEndpoint(Uri uri)
+    {
+        if (!IsFleetHost(uri.Host)) return false;
+        var parts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 6) return false;
+        var tail = parts[^6..];
+        return tail[0] == "api" && tail[2] == "fleet" && tail[3] == "device" && tail[5] == "transparency";
+    }
+
+    /// <summary>
+    /// Resolves the transparency endpoint's redirect natively and opens the
+    /// destination in the default browser. Opening the endpoint itself in the
+    /// browser would put the device token in its address bar and history. For the
+    /// same reason only an absolute <c>Location</c> is opened: the server accepts a
+    /// relative transparency URL and sends it verbatim, and resolving it against the
+    /// endpoint would keep the token in the path.
+    /// </summary>
+    private async void OpenTransparencyPage(Uri uri)
+    {
+        var status = 0;
+        string? location = null;
+        string? error = null;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            using var response = await NoRedirectHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            status = (int)response.StatusCode;
+            location = response.Headers.Location?.OriginalString;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        if (status is >= 300 and <= 399 &&
+            Uri.TryCreate(location, UriKind.Absolute, out var target) && !string.IsNullOrEmpty(target.Scheme))
+        {
+            OpenExternal(target);
+            return;
+        }
+
+        // The page's links embed the token it was rendered with, so a rejection
+        // means it rotated. Recover the same way as a 401/403 inside the WebView:
+        // re-read the token and reload the page.
+        if (status is 401 or 403)
+        {
+            NavigationError?.Invoke();
+        }
+        Debug.WriteLine($"Fleet Desktop: Transparency redirect failed (HTTP {status}): {error ?? "no absolute redirect target"}");
+    }
+
     // ---- External URL handling ----------------------------------------------
 
     private static void OpenExternal(Uri uri)
     {
         var scheme = uri.Scheme?.ToLowerInvariant() ?? "";
         if (!AllowedExternalSchemes.Contains(scheme)) return;
+        LaunchWithShell(uri);
+    }
+
+    /// <summary>
+    /// Hands a navigation to a native authenticator app when an IdP asks for one
+    /// during an SSO flow. The IdP page stays where it is and keeps polling, so the
+    /// flow must stay active. Returns false when the URL isn't an authenticator
+    /// scheme or no flow is running, so callers apply their usual policy.
+    /// </summary>
+    private bool TryLaunchAuthenticator(Uri uri)
+    {
+        if (!SsoFlowActive || SsoFlowExpired) return false;
+        if (!AuthenticatorSchemes.Contains(uri.Scheme ?? "")) return false;
+        LaunchWithShell(uri);
+        return true;
+    }
+
+    private static void LaunchWithShell(Uri uri)
+    {
         try
         {
+            // AbsoluteUri keeps the URL percent-encoded, so the shell receives one
+            // unambiguous token rather than a string with spaces or unicode in it.
             Process.Start(new ProcessStartInfo
             {
-                FileName = uri.ToString(),
+                FileName = uri.AbsoluteUri,
                 UseShellExecute = true,
             });
         }
@@ -497,54 +667,94 @@ public partial class MainWindow : Window
         }
     }
 
+    // ---- Theme --------------------------------------------------------------------
+
+    private void ApplyTheme(bool dark)
+    {
+        var background = dark
+            ? new SolidColorBrush(WindowsTheme.DarkWindowBackground)
+            : SystemColors.WindowBrush;
+        RootGrid.Background = background;
+        LoadingOverlay.Background = background;
+        WindowsTheme.ApplyTitleBar(new WindowInteropHelper(this).Handle, dark);
+    }
+
+    private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category != UserPreferenceCategory.General) return;
+        Dispatcher.BeginInvoke(() => ApplyTheme(WindowsTheme.IsDarkMode()));
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        WindowsTheme.ApplyTitleBar(new WindowInteropHelper(this).Handle, WindowsTheme.IsDarkMode());
+    }
+
+    // ---- Suspend while hidden ---------------------------------------------------
+
+    /// <summary>
+    /// Freezes the renderer while the window is hidden, so a Fleet Desktop that was
+    /// closed hours ago isn't still running page timers. WebView2 resumes on its own
+    /// when the view becomes visible; navigations and scripts call
+    /// <see cref="EnsureResumed"/> first.
+    /// </summary>
+    private async Task SuspendIfHiddenAsync()
+    {
+        if (!_coreReady || IsVisible) return;
+        try
+        {
+            if (!WebView.CoreWebView2.IsSuspended)
+            {
+                await WebView.CoreWebView2.TrySuspendAsync();
+            }
+        }
+        catch
+        {
+            // Not suspendable right now (e.g. a navigation in flight); try next time.
+        }
+    }
+
+    private void EnsureResumed()
+    {
+        _suspendTimer.Stop();
+        try
+        {
+            if (WebView.CoreWebView2.IsSuspended)
+            {
+                WebView.CoreWebView2.Resume();
+            }
+        }
+        catch
+        {
+            // Resume is best-effort; a navigation resumes the view regardless.
+        }
+    }
+
     // ---- Show/Close hooks ----------------------------------------------------
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
         // Hide instead of close so the WebView stays alive and reopening is instant.
         e.Cancel = true;
+        SavePlacement();
         ResetSsoFlow();
         _pendingPostLoadJs = null;
         Hide();
+        _suspendTimer.Stop();
+        _suspendTimer.Start();
     }
 
-    /// <summary>
-    /// Best-effort delete of per-launch WebView2 profile folders left behind by
-    /// earlier runs. Folders still held open by a live browser process are left
-    /// untouched; they'll be swept on a later launch.
-    /// </summary>
-    private static void CleanupStaleUserDataFolders(string root, string keep)
+    protected override void OnClosed(EventArgs e)
     {
-        try
-        {
-            foreach (var dir in Directory.EnumerateDirectories(root))
-            {
-                if (string.Equals(dir, keep, StringComparison.OrdinalIgnoreCase)) continue;
-                try
-                {
-                    // A recursive delete is not atomic — it would strip unlocked
-                    // files out of a profile a live instance (same user, another
-                    // session) is still using before failing on a locked one.
-                    // Renaming the directory first fails outright while any file
-                    // inside is open, so in-use profiles are never touched.
-                    var tombstone = dir + ".stale";
-                    Directory.Move(dir, tombstone);
-                    Directory.Delete(tombstone, recursive: true);
-                }
-                catch
-                {
-                    // In use or already gone — skip.
-                }
-            }
-        }
-        catch
-        {
-            // Root missing or unreadable — nothing to sweep.
-        }
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        base.OnClosed(e);
     }
 
     public new void Show()
     {
+        _suspendTimer.Stop();
+        if (_coreReady) EnsureResumed();
         if (Visibility != Visibility.Visible)
         {
             base.Show();

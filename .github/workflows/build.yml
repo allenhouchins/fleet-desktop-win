@@ -19,10 +19,14 @@ on:
 # requests from forks. Signing happens in build-and-release.yml.
 jobs:
   build:
-    name: Build MSI
+    name: Build MSI (${{ matrix.runtime }})
     runs-on: windows-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [win-x64, win-arm64]
 
     steps:
       - name: Checkout
@@ -44,12 +48,18 @@ jobs:
       - name: Build MSI
         id: build
         shell: pwsh
-        run: .\build.ps1 -Configuration Release
+        run: .\build.ps1 -Configuration Release -Runtime ${{ matrix.runtime }}
+
+      - name: Smoke-test the notify exit-code contract
+        shell: pwsh
+        run: .\dev-notify-smoke.ps1 -Runtime ${{ matrix.runtime }}
+        # The ARM64 binary can't run on the x64 runner.
+        if: matrix.runtime == 'win-x64'
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fleet-desktop-msi-unsigned-v${{ steps.build.outputs.VERSION }}
+          name: fleet-desktop-msi-unsigned-v${{ steps.build.outputs.VERSION }}-${{ steps.build.outputs.PLATFORM }}
           path: ${{ steps.build.outputs.MSI_PATH }}
           if-no-files-found: error
           retention-days: 30

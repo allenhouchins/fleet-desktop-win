@@ -32,6 +32,8 @@ internal sealed class FleetService : IDisposable
     private static readonly TimeSpan TokenRetryDelay = TimeSpan.FromSeconds(5);
     private const int MaxRetryAttempts = 3;
 
+    private const string OrbitServiceKey = @"SYSTEM\CurrentControlSet\Services\Fleet osquery";
+
     private static readonly HttpClient Http = new(new SocketsHttpHandler
     {
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
@@ -43,7 +45,7 @@ internal sealed class FleetService : IDisposable
     private readonly object _stateLock = new();
     private readonly string _orbitRoot;
     private readonly string _tokenFile;
-    private readonly string? _fleetUrlFromService;
+    private readonly OrbitServiceConfig _serviceConfig;
 
     private MainWindow? _browserWindow;
     private DispatcherTimer? _refreshTimer;
@@ -60,11 +62,11 @@ internal sealed class FleetService : IDisposable
     private string? _pendingInstallAllCategoryId;
     private bool _userRequestedFleetUi;
 
-    /// <summary>Most recent failing_policies_count from the desktop API. Guarded by _stateLock.</summary>
+    /// <summary>Most recent badge count from the desktop API. Guarded by _stateLock.</summary>
     private int? _lastBadgeCount;
 
     /// <summary>
-    /// The failing_policies_count reflected by the currently loaded web page. Compared to
+    /// The badge count reflected by the currently loaded web page. Compared to
     /// <see cref="_lastBadgeCount"/> when the window is shown to detect a stale Policies tab
     /// (e.g. the count dropped to 0 while the window was closed). Guarded by _stateLock.
     /// </summary>
@@ -75,33 +77,27 @@ internal sealed class FleetService : IDisposable
 
     public FleetService()
     {
-        // On Windows, the Fleet URL and root-dir live as command-line arguments
-        // baked into the "Fleet osquery" service's ImagePath registry value by
-        // fleetd's own WiX installer. (Unlike macOS, there's no fleet_url.txt —
-        // that file is written only on darwin from an Apple config profile.)
-        var serviceArgs = ReadOrbitServiceArgs();
-        _fleetUrlFromService = serviceArgs != null ? ExtractArg(serviceArgs, "fleet-url") : null;
-
-        _orbitRoot = ResolveOrbitRoot(serviceArgs);
+        // On Windows, orbit's configuration is attached to the "Fleet osquery"
+        // service by fleetd's own MSI (see ReadOrbitServiceConfig). There is no
+        // fleet_url.txt — that file is written only on darwin from an Apple
+        // configuration profile.
+        _serviceConfig = ReadOrbitServiceConfig();
+        _orbitRoot = ResolveOrbitRoot(_serviceConfig.RootDir);
         _tokenFile = Path.Combine(_orbitRoot, "identifier");
     }
 
-    private static string ResolveOrbitRoot(string? serviceArgs)
+    private static string ResolveOrbitRoot(string? fromService)
     {
         var fromEnv = Environment.GetEnvironmentVariable("ORBIT_ROOT_DIR");
         if (!string.IsNullOrWhiteSpace(fromEnv))
         {
             return fromEnv.Trim();
         }
-        if (serviceArgs != null)
+        if (!string.IsNullOrWhiteSpace(fromService))
         {
-            var fromService = ExtractArg(serviceArgs, "root-dir");
-            if (!string.IsNullOrWhiteSpace(fromService))
-            {
-                // fleetd's WiX template uses [ORBITROOT]. → trailing "\." which Path.Combine
-                // tolerates, but trim it so error messages show a clean path.
-                return fromService.TrimEnd('.', '\\', '/').TrimEnd('\\', '/');
-            }
+            // fleetd's WiX template uses [ORBITROOT]. → trailing "\." which Path.Combine
+            // tolerates, but trim it so error messages show a clean path.
+            return fromService.Trim().TrimEnd('.', '\\', '/').TrimEnd('\\', '/');
         }
         // Last-resort default install path.
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
@@ -112,31 +108,77 @@ internal sealed class FleetService : IDisposable
         return Path.Combine(programFiles, "Orbit");
     }
 
+    /// <summary>Orbit's settings as attached to its Windows service, plus where they
+    /// came from (for error messages).</summary>
+    private sealed record OrbitServiceConfig(string? FleetUrl, string? RootDir, string Source);
+
     /// <summary>
-    /// Reads HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery\ImagePath.
-    /// Returns the full command line (exe path + args) or null if the service
-    /// isn't installed / can't be read.
+    /// Reads orbit's configuration from the "Fleet osquery" service registration —
+    /// the same place orbit itself starts from, so the app needs no configuration of
+    /// its own (the Windows counterpart of the macOS app reading fleetd's plists).
+    ///
+    /// fleetd MSIs built since September 2026 set it in the service's
+    /// <c>Environment</c> value (<c>ORBIT_FLEET_URL=…</c>, <c>ORBIT_ROOT_DIR=…</c>).
+    /// Earlier MSIs passed everything as <c>--fleet-url</c> / <c>--root-dir</c>
+    /// arguments in <c>ImagePath</c>, and hosts enrolled with those keep that form
+    /// across orbit's self-updates, so both are supported.
     /// </summary>
-    private static string? ReadOrbitServiceArgs()
+    private static OrbitServiceConfig ReadOrbitServiceConfig()
     {
+        const string serviceName = "\"Fleet osquery\" service";
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SYSTEM\CurrentControlSet\Services\Fleet osquery");
+            using var key = Registry.LocalMachine.OpenSubKey(OrbitServiceKey);
+            if (key == null)
+            {
+                return new OrbitServiceConfig(null, null, $"the {serviceName} (not installed)");
+            }
+
+            if (key.GetValue("Environment") is string[] environment)
+            {
+                var url = EnvironmentValue(environment, "ORBIT_FLEET_URL");
+                var root = EnvironmentValue(environment, "ORBIT_ROOT_DIR");
+                if (!string.IsNullOrWhiteSpace(url) || !string.IsNullOrWhiteSpace(root))
+                {
+                    return new OrbitServiceConfig(url, root, $"ORBIT_FLEET_URL in the {serviceName}'s Environment value");
+                }
+            }
+
             // GetValue with DoNotExpandEnvironmentNames preserves any %VAR% tokens; the
             // ImagePath for fleetd is typically a plain string but be safe.
-            return key?.GetValue("ImagePath", null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
+            if (key.GetValue("ImagePath", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is string imagePath)
+            {
+                return new OrbitServiceConfig(
+                    ExtractArg(imagePath, "fleet-url"),
+                    ExtractArg(imagePath, "root-dir"),
+                    $"the --fleet-url argument in the {serviceName}'s ImagePath");
+            }
+            return new OrbitServiceConfig(null, null, $"the {serviceName} (no configuration found)");
         }
         catch
         {
-            return null;
+            return new OrbitServiceConfig(null, null, $"the {serviceName} (could not be read)");
         }
+    }
+
+    /// <summary>Looks up <c>NAME=value</c> in a REG_MULTI_SZ environment block.</summary>
+    private static string? EnvironmentValue(string[] environment, string name)
+    {
+        foreach (var entry in environment)
+        {
+            var separator = entry.IndexOf('=');
+            if (separator <= 0) continue;
+            if (string.Equals(entry[..separator].Trim(), name, StringComparison.OrdinalIgnoreCase))
+            {
+                return entry[(separator + 1)..].Trim();
+            }
+        }
+        return null;
     }
 
     /// <summary>
     /// Extracts a "--name" argument value from a command-line string. Supports both
-    /// quoted (--name "value") and unquoted (--name value, --name=value) forms.
+    /// quoted (--name "value with spaces") and unquoted (--name value, --name=value) forms.
     /// </summary>
     private static string? ExtractArg(string commandLine, string name)
     {
@@ -418,6 +460,7 @@ internal sealed class FleetService : IDisposable
     {
         _refreshTimer?.Stop();
         _refreshTimer = null;
+        _browserWindow?.SavePlacement();
     }
 
     // ---- Setup ---------------------------------------------------------------
@@ -524,23 +567,24 @@ internal sealed class FleetService : IDisposable
         {
             ShowFatalError(
                 "Fleet Desktop could not find the Fleet server URL.\n\n" +
-                "Expected to read it from the \"Fleet osquery\" Windows service " +
-                "(HKLM\\SYSTEM\\CurrentControlSet\\Services\\Fleet osquery\\ImagePath, " +
-                "--fleet-url argument).\n\n" +
+                $"Expected to read it from {_serviceConfig.Source}.\n\n" +
                 "Ensure the Fleet orbit agent (fleetd) is installed and enrolled on this machine. " +
                 "Contact your administrator if the problem persists.");
             return false;
         }
 
         // Require HTTPS — the device token is sent to this URL, and a misconfigured
-        // http:// value would put it on the wire in cleartext.
+        // http:// value would put it on the wire in cleartext. Require a host too:
+        // Uri accepts host-less values like "https://", which would otherwise build
+        // a device URL whose host is the literal path segment "device".
         if (!Uri.TryCreate(fleetUrl, UriKind.Absolute, out var parsedFleetUrl) ||
-            !string.Equals(parsedFleetUrl.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+            !string.Equals(parsedFleetUrl.Scheme, "https", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrEmpty(parsedFleetUrl.Host))
         {
             ShowFatalError(
-                "The configured Fleet URL must use HTTPS.\n\n" +
+                "The configured Fleet URL must be a valid HTTPS URL.\n\n" +
                 $"Read: {fleetUrl}\n\n" +
-                "Check the --fleet-url argument on the \"Fleet osquery\" service.");
+                $"Check {_serviceConfig.Source}.");
             return false;
         }
 
@@ -703,22 +747,28 @@ internal sealed class FleetService : IDisposable
         try
         {
             using var resp = await Http.GetAsync(url).ConfigureAwait(false);
+            // 401/403 is the token-rotation window; the next tick re-reads the token.
             if (!resp.IsSuccessStatusCode) return;
             var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
             var data = JsonSerializer.Deserialize<DesktopResponse>(json);
             if (data == null) return;
 
+            // The badge counts only policies shown to the end user, ignoring ones the
+            // IT admin hid. Servers older than the hidden-policies feature don't send
+            // the unhidden count; fall back to the total to keep the old behavior.
+            var count = data.FailingUnhiddenPoliciesCount ?? data.FailingPoliciesCount;
+
             lock (_stateLock)
             {
-                _lastBadgeCount = data.FailingPoliciesCount;
+                _lastBadgeCount = count;
                 // On the first successful poll, seed the page-state count too —
                 // the loaded web page reflects Fleet state at this same moment.
-                _pageBadgeCount ??= data.FailingPoliciesCount;
+                _pageBadgeCount ??= count;
             }
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                _browserWindow?.SetBadge(data.FailingPoliciesCount);
+                _browserWindow?.SetBadge(count);
             });
         }
         catch
@@ -731,6 +781,9 @@ internal sealed class FleetService : IDisposable
     {
         [JsonPropertyName("failing_policies_count")]
         public int FailingPoliciesCount { get; set; }
+
+        [JsonPropertyName("failing_unhidden_policies_count")]
+        public int? FailingUnhiddenPoliciesCount { get; set; }
     }
 
     // ---- URL construction ----------------------------------------------------
@@ -768,23 +821,31 @@ internal sealed class FleetService : IDisposable
     // ---- Config / file reading ----------------------------------------------
 
     /// <summary>
-    /// Returns the Fleet server URL parsed from the "Fleet osquery" service's
-    /// ImagePath in the registry. Debug builds only: the FLEET_URL env var takes
-    /// precedence for local testing. It is compiled out of Release builds because
-    /// a user-writable environment variable must not be able to redirect the
-    /// device token to an attacker-controlled host.
+    /// Returns the Fleet server URL from orbit's service registration. Debug builds
+    /// only: the FLEET_URL env var takes precedence for local testing. It is compiled
+    /// out of Release builds because a user-writable environment variable must not be
+    /// able to redirect the device token to an attacker-controlled host.
     /// </summary>
     private string? ReadFleetUrl()
     {
 #if DEBUG
         var fromEnv = Environment.GetEnvironmentVariable("FLEET_URL");
-        if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv.Trim();
+        if (!string.IsNullOrWhiteSpace(fromEnv)) return NormalizeFleetUrl(fromEnv);
 #endif
-        return string.IsNullOrWhiteSpace(_fleetUrlFromService) ? null : _fleetUrlFromService;
+        return NormalizeFleetUrl(_serviceConfig.FleetUrl);
+    }
+
+    /// <summary>Trims the value and, like orbit, treats a scheme-less value such as
+    /// <c>fleet.example.com:8080</c> as HTTPS.</summary>
+    private static string? NormalizeFleetUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var trimmed = value.Trim();
+        return trimmed.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? trimmed : "https://" + trimmed;
     }
 
     /// <summary>
-    /// Allowed device-token shape: alphanumerics plus - and _. Rejecting anything
+    /// Allowed device-token shape: ASCII alphanumerics plus - and _. Rejecting anything
     /// else keeps path separators and other URL metacharacters out of the device
     /// URLs built from the token.
     /// </summary>

@@ -10,9 +10,10 @@
         (we look for C:\Program Files\Orbit\bin\orbit\orbit.exe — installed
         by fleetd's own MSI, so its presence is our equivalent of the
         macOS MDM check).
-      * Installs FleetDesktop.exe (self-contained single-file) to
-        %ProgramFiles%\Fleet Desktop\.
-      * Registers the fleet:// URL scheme machine-wide.
+      * Installs FleetDesktop.exe (self-contained single-file) and its native
+        companion DLLs to %ProgramFiles%\Fleet Desktop\.
+      * Registers the fleet:// URL scheme machine-wide and advertises the
+        app's capabilities (e.g. `notify`) under HKLM\Software\FleetDM\FleetDesktop.
       * Drops a Start Menu shortcut.
       * Gracefully closes the running app before upgrading.
       * Performs a clean MajorUpgrade.
@@ -91,14 +92,13 @@
     <!-- ===================================================================
          Components.
          ================================================================== -->
-    <Component Id="FleetDesktopExe"
-               Directory="INSTALLFOLDER"
-               Guid="A7E3C0B4-2F66-4B98-8C9B-0A6BB1D2C100"
-               Bitness="always64">
-      <File Id="FleetDesktopExeFile"
-            Source="$(var.PublishDir)FleetDesktop.exe"
-            KeyPath="yes" />
-    </Component>
+    <!-- Everything `dotnet publish` produced: the single-file EXE plus the native
+         DLLs it loads from its own directory (WPF's, WebView2Loader). Harvested at
+         build time (WiX 5's Files element) so a runtime/package update can't
+         silently leave a DLL behind, and the x64/ARM64 sets need no maintenance. -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PublishDir)**" />
+    </ComponentGroup>
 
     <Component Id="UrlSchemeRegistration"
                Directory="INSTALLFOLDER"
@@ -120,6 +120,18 @@
                      Type="string"
                      Value="[INSTALLFOLDER]"
                      KeyPath="yes" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\FleetDM\FleetDesktop"
+                     Name="Version"
+                     Type="string"
+                     Value="$(var.ProductVersion)" />
+      <!-- Capabilities a caller can check before invoking a subcommand — the
+           Windows counterpart of FleetDesktopCapabilities in the macOS Info.plist. -->
+      <RegistryValue Root="HKLM"
+                     Key="Software\FleetDM\FleetDesktop\Capabilities"
+                     Name="notify"
+                     Type="integer"
+                     Value="1" />
     </Component>
 
     <!-- Per-user data (Start Menu folder + shortcut) with a per-user (HKCU) keypath.
@@ -151,7 +163,7 @@
              Level="1"
              AllowAbsent="no"
              ConfigurableDirectory="INSTALLFOLDER">
-      <ComponentRef Id="FleetDesktopExe" />
+      <ComponentGroupRef Id="AppFiles" />
       <ComponentRef Id="UrlSchemeRegistration" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>

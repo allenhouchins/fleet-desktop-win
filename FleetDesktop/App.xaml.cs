@@ -1,13 +1,12 @@
 using System;
-using System.Threading.Tasks;
 using System.Windows;
 
 namespace FleetDesktop;
 
 /// <summary>
-/// WPF application entry. Mirrors the macOS AppDelegate:
-/// - Enforces a single instance (mutex + named pipe to forward fleet:// URLs).
-/// - Parses the command line for a fleet:// URL.
+/// WPF application entry. Mirrors the macOS FleetDesktopMain + AppDelegate:
+/// - Routes subcommands (<c>notify</c>, <c>help</c>) before any GUI state exists.
+/// - Enforces a single GUI instance (mutex + named pipe to forward fleet:// URLs).
 /// - Starts <see cref="FleetService"/>, which owns config, token rotation, and the browser window.
 /// </summary>
 public partial class App : Application
@@ -26,7 +25,35 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
-        var (initialUrl, hidden) = ParseArgs(e.Args);
+        // Dispatched before the single-instance guard is installed, so a subcommand
+        // never touches the mutex, the fleet:// pipe or FleetService.
+        switch (Cli.RouteArgs(e.Args))
+        {
+            case Cli.Route.Usage usage:
+                Cli.Emit(usage.Text, toStderr: usage.Code != 0);
+                Environment.Exit(usage.Code);
+                return;
+
+            case Cli.Route.Notify notify:
+                if (notify.Options.IsDetachedChild)
+                {
+                    // Creates the toast and returns; the dispatcher loop drives it.
+                    NotifyCommand.RunChild(notify.Options);
+                }
+                else
+                {
+                    NotifyCommand.RunParent(notify.Options); // never returns
+                }
+                return;
+
+            case Cli.Route.RunGui gui:
+                StartGui(gui.FleetUrl, gui.Hidden);
+                return;
+        }
+    }
+
+    private void StartGui(string? initialUrl, bool hidden)
+    {
         LaunchedHidden = hidden;
 
         // v2: the pipe name gained a per-user SID suffix and the protocol gained
@@ -68,28 +95,5 @@ public partial class App : Application
         _fleetService?.Dispose();
         _singleInstance?.Dispose();
         base.OnExit(e);
-    }
-
-    private static (string? Url, bool Hidden) ParseArgs(string[] args)
-    {
-        string? url = null;
-        bool hidden = false;
-        foreach (var raw in args)
-        {
-            if (string.IsNullOrWhiteSpace(raw)) continue;
-            var arg = raw.Trim();
-            if (arg.Equals("--hidden", StringComparison.OrdinalIgnoreCase) ||
-                arg.Equals("--minimized", StringComparison.OrdinalIgnoreCase) ||
-                arg.Equals("/hidden", StringComparison.OrdinalIgnoreCase))
-            {
-                hidden = true;
-                continue;
-            }
-            if (arg.StartsWith("fleet://", StringComparison.OrdinalIgnoreCase))
-            {
-                url = arg;
-            }
-        }
-        return (url, hidden);
     }
 }
