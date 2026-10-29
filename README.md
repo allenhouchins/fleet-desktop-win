@@ -6,7 +6,7 @@ This is the Windows companion to the [macOS version](https://github.com/allenhou
 
 ## Features
 
-- **Native Windows app** built with .NET 8 + WPF
+- **Native Windows app** built with .NET 8 + WPF, for **x64 and ARM64** Windows
 - **WebView2** embedded browser (Chromium/Edge-based, modern and secure)
 - **Self-service portal** embedded in a native window
 - **Automatic token refresh** handles hourly token rotation transparently
@@ -14,13 +14,15 @@ This is the Windows companion to the [macOS version](https://github.com/allenhou
 - **File download support** — downloads save to the user's Downloads folder
 - **Light/dark mode** respects the user's system appearance
 - **`fleet://` URL scheme** for deep linking to Self-service, Policies, Software, triggering refetches, and one-click "Update all" / "Install all" flows
-- **Taskbar overlay badge** showing failing policy count (Windows equivalent of the macOS Dock badge); the page auto-reloads on reopen if the count changed while the window was closed
+- **Taskbar overlay badge** showing the count of failing policies shown to the end user (policies hidden by the IT admin are ignored; Windows equivalent of the macOS Dock badge); the page auto-reloads on reopen if the count changed while the window was closed
+- **End-user notification toasts** — `FleetDesktop.exe notify --url …` shows Fleet's patch notification page as a toast with the same exit-code contract as the macOS app (see [Notifications](#notifications))
+- **Window position and size** are remembered between launches
 - **fleetd required** — both the app and installer require Fleet's orbit agent to be installed and enrolled
 - **Authenticode-signed MSI installer** for secure enterprise distribution
 
 ## Requirements
 
-- Windows 10 (version 1809 / build 17763) or newer — 64-bit
+- Windows 10 (version 1809 / build 17763) or newer — x64 or ARM64
 - [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (pre-installed on Windows 11 and recent Windows 10 builds)
 - Fleet's orbit agent (fleetd) installed and enrolled
 - `C:\Program Files\Orbit\bin\orbit\orbit.exe` (created by fleetd's MSI)
@@ -30,7 +32,7 @@ This is the Windows companion to the [macOS version](https://github.com/allenhou
 
 ### From Releases
 
-1. Download the latest `fleet_desktop-v*.msi` from the [Releases](https://github.com/allenhouchins/fleet-desktop-win/releases) page
+1. Download the latest `fleet_desktop-v*-x64.msi` (or `-arm64.msi` for Windows on ARM) from the [Releases](https://github.com/allenhouchins/fleet-desktop-win/releases) page
 2. Double-click the `.msi` file to run the installer
 3. Follow the installation wizard
 
@@ -46,8 +48,8 @@ The MSI can be wrapped as a Win32 app and deployed via Intune. The installer's M
 
 ## How It Works
 
-1. **Reads the Fleet URL** from the `Fleet osquery` Windows service's `ImagePath` registry value (parsed from the `--fleet-url` arg baked in by fleetd's MSI)
-2. **Reads the device token** from `<root-dir>\identifier` — `<root-dir>` is parsed from the same service args (`--root-dir`), defaulting to `C:\Program Files\Orbit\`
+1. **Reads the Fleet URL** from the `Fleet osquery` Windows service's registration — the same place orbit itself starts from (see [Configuration sources](#configuration-sources))
+2. **Reads the device token** from `<root-dir>\identifier` — `<root-dir>` comes from the same service registration, defaulting to `C:\Program Files\Orbit\`
 3. **Opens the self-service portal** at `{FleetURL}/device/{token}/self-service` in an embedded WebView2 window
 
 ### Token Rotation
@@ -64,16 +66,52 @@ When Fleet serves downloadable content, files are saved to the user's `Downloads
 
 The macOS app auto-opens `.mobileconfig` MDM profiles; Windows doesn't have an equivalent file format, so all downloads are saved without auto-launch. Users can install MSIs / EXEs from their Downloads folder.
 
+### Notifications
+
+Fleet's end-user patch notifications are shown by the same binary, as a borderless toast anchored bottom-right of the screen the cursor is on:
+
+```powershell
+& "C:\Program Files\Fleet Desktop\FleetDesktop.exe" notify --url "https://fleet.example.com/device/<token>/notifications/<uuid>"
+```
+
+The process returns as soon as the toast is on screen; a detached child process owns the window until the page dismisses it, the user presses **Ctrl+Shift+X** (a fallback for when the page's own dismiss doesn't work), or 10 minutes pass. The exit code is the contract Fleet records — the values are identical to the macOS app's:
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Displayed |
+| `2` | Usage error (bad or missing `--url`; it must be `https://` with a host) |
+| `30` | The page did not load (network failure, or nothing rendered within 30s) |
+| `31` | The page returned an HTTP error, or rendered Fleet's error copy (expired device token) |
+| `40` | No user is logged in at the console |
+| `41` | The screen is locked |
+| `42` | No display is attached |
+| `50` | Another notification is already displayed |
+| `70` | Internal error |
+
+fleetd runs scripts as `SYSTEM` in session 0, where nothing drawn is visible, so when `notify` finds itself there it launches the toast in the console user's session itself (the Windows counterpart of the macOS script's `launchctl asuser`). A caller can check for support before invoking it: the MSI writes `HKLM\Software\FleetDM\FleetDesktop\Capabilities\notify = 1` (the counterpart of `FleetDesktopCapabilities` in the macOS `Info.plist`) and `HKLM\Software\FleetDM\FleetDesktop\InstallDir`.
+
+The page talks to the toast through the same bridge as on macOS — `window.webkit.messageHandlers.fleetDesktop.postMessage({ v: 1, action, payload })` — which the toast provides on WebView2 as a shim, so Fleet's notification page needs no platform-specific code. Messages are accepted only from the main frame of the origin (scheme, host and port) the toast was opened with. Actions: `ready`, `primary`, `dismiss`, `error`, `resize`, `log`.
+
+Collecting the exit code from PowerShell needs care, because the app is a GUI-subsystem executable: the call operator (`& $exe notify ...`) doesn't wait for it at all unless its output is piped, and `Start-Process -Wait` waits for every descendant too — including the detached child that owns the toast — so it only returns once the toast closes. Start it through `System.Diagnostics.Process` and call `WaitForExit()` (see `dev-notify.ps1`), or pipe its output (`& $exe notify --url $url | Out-Null; exit $LASTEXITCODE`), which returns as soon as the parent exits because the child's stdio is not inherited. `dev-notify.ps1` shows a toast for a URL and prints the exit code; `dev-notify-smoke.ps1` asserts the exit-code contract for every path that exits before a window appears, and runs in CI.
+
+The toast logs to `%LOCALAPPDATA%\FleetDesktop\Logs\notify.log` (the SYSTEM profile's, for the parent half when run by fleetd). The notification URL is never logged, since it carries the device token.
+
 ### Security
 
 - The Fleet server URL must use HTTPS — the app refuses to start with a cleartext `http://` URL rather than send the device token over the wire unencrypted
 - Device tokens are validated (alphanumerics plus `-`/`_` only) so path separators and URL metacharacters can never reach a constructed URL, and are URL-encoded on top of that
 - SSO flows are pinned to the current identity-provider host: hops to a new host are only allowed via server redirects or scripted navigations (multi-host IdP chains still work), user link clicks to unrelated hosts open in the default browser, and flows expire after 10 minutes
+- During an SSO flow, navigations to a known authenticator app scheme (`com-okta-authenticator`, used by Okta Verify for FastPass) are handed to that app; any other custom scheme ends the flow
+- The transparency link's redirect is resolved by the app and only an absolute destination is opened in the default browser, so the device token never reaches the browser
+- Navigations to the Fleet host are only allowed over HTTPS; a cleartext hop would carry the device token
 - External links restricted to `https`, `http`, and `mailto` schemes
+- The `notify` toast is confined to the origin it was opened with, accepts bridge messages only from that origin's main frame, and opens `window.open` / link clicks in the default browser
 - Downloads keep only the final path component of the server-supplied filename and always land in the user's Downloads folder
 - The `FLEET_URL` environment-variable override is compiled out of Release builds — a user-writable env var can't redirect the device token to another host
-- WebView2 uses a per-launch user data folder with password autosave and autofill disabled (no cookies or cache persist between sessions); stale folders from earlier launches are swept on startup
-- The single-instance named pipe is scoped to the current user's SID and restricted with `PipeOptions.CurrentUserOnly`, so other local users can't connect to or squat it
+- The app's native libraries are installed next to the EXE under `Program Files` rather than extracted to the user's `%TEMP%` at launch, so nothing is loaded from a user-writable directory
+- WebView2 uses a per-launch user data folder with password autosave and autofill disabled (no cookies or cache persist between sessions); stale folders from earlier launches are swept on startup. The main window closes WebView2's web-message channel (it never uses it), and the toast enables it only for its origin-checked bridge
+- The single-instance named pipe is scoped to the current user's SID and restricted with `PipeOptions.CurrentUserOnly`, so other local users can't connect to or squat it, and it accepts at most 8 KB per message
+- The `notify` child process is started with raw `CreateProcess` so that exactly one handle (the handshake pipe) is inherited — fleetd reads script output until EOF, and a child holding the caller's stdout open would make the script look hung
 - Mutable state protected by a lock for thread safety
 - The fleet:// URL scheme handler is registered machine-wide via the MSI
 
@@ -85,21 +123,31 @@ The macOS app auto-opens `.mobileconfig` MDM profiles; Windows doesn't have an e
 fleet-desktop-win/
 ├── FleetDesktop/
 │   ├── FleetDesktop.csproj      # .NET 8 WPF project
-│   ├── App.xaml / App.xaml.cs   # Application entry, single-instance, URL parsing
-│   ├── MainWindow.xaml(.cs)     # WebView2 host, loading overlay, downloads
+│   ├── App.xaml / App.xaml.cs   # Application entry: CLI routing, single-instance
+│   ├── Cli.cs                   # Argument parsing, exit codes
+│   ├── MainWindow.xaml(.cs)     # WebView2 host, loading overlay, downloads, SSO policy
 │   ├── FleetService.cs          # Config, token mgmt, badge polling, fleet:// handling
+│   ├── NotifyCommand.cs         # `notify`: parent/child handshake, session hop, toast lock
+│   ├── ToastWindow.xaml(.cs)    # Borderless notification toast + JS bridge
+│   ├── FleetErrorPage.cs        # Shared detection of Fleet's error page
 │   ├── SingleInstance.cs        # Mutex + named pipe URL dispatch
 │   ├── TaskbarBadge.cs          # Overlay icon rendering
+│   ├── WindowsTheme.cs          # Dark-mode title bar / overlay
+│   ├── WindowPlacement.cs       # Remembered window bounds (HKCU)
+│   ├── WebViewProfiles.cs       # Per-launch WebView2 profile folders
+│   ├── NativeMethods.cs         # Win32 interop
 │   ├── app.manifest             # Per-monitor DPI, supportedOS
 │   └── Assets/
 │       ├── app.ico
 │       └── fleet-logo.png
 ├── Installer/
-│   ├── FleetDesktop.Installer.wixproj   # WiX v4 SDK project
+│   ├── FleetDesktop.Installer.wixproj   # WiX v5 SDK project
 │   ├── Product.wxs              # MSI definition
 │   └── License.rtf
-├── build.ps1                    # Local build script
+├── build.ps1                    # Local build script (-Runtime win-x64|win-arm64)
 ├── sign.ps1                     # Authenticode signing (PFX or Azure Trusted Signing)
+├── dev-notify.ps1               # Show a toast for a URL, print the exit code
+├── dev-notify-smoke.ps1         # Assert the notify exit-code contract (runs in CI)
 └── .github/workflows/
     ├── build.yml                # CI compile check: unsigned MSI artifact, no secrets
     └── build-and-release.yml    # Tag push / manual: signs and creates a GitHub Release
@@ -114,8 +162,11 @@ You need:
 - The build automatically restores the WiX toolset via NuGet — no separate install needed
 
 ```powershell
-# Build the MSI (Release configuration)
+# Build the x64 MSI (Release configuration)
 .\build.ps1
+
+# Build the ARM64 MSI
+.\build.ps1 -Runtime win-arm64
 
 # EXE only — skip the MSI step
 .\build.ps1 -SkipMsi
@@ -124,7 +175,7 @@ You need:
 .\build.ps1 -Configuration Debug
 ```
 
-The output MSI lands at `Installer\bin\Release\fleet_desktop-v<version>.msi`.
+The output MSI lands at `Installer\bin\<x64|arm64>\Release\fleet_desktop-v<version>-<x64|arm64>.msi`. The publish output is a single-file EXE plus the native DLLs it loads (WPF's and `WebView2Loader.dll`); the installer harvests the whole publish directory.
 
 To run the app without building an MSI:
 
@@ -150,11 +201,17 @@ dotnet run --project FleetDesktop\FleetDesktop.csproj
 
 ### Configuration sources
 
+The app reads orbit's own configuration from the `Fleet osquery` service registration under `HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery`, so it needs no configuration of its own. Both forms fleetd has used are supported:
+
 | Source | Purpose |
 |--------|---------|
-| `HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery\ImagePath` (`--fleet-url`) | Fleet server URL — baked into the service args by fleetd's MSI |
-| `HKLM\SYSTEM\CurrentControlSet\Services\Fleet osquery\ImagePath` (`--root-dir`) | Orbit root directory — used to locate `identifier` |
+| `Environment` value: `ORBIT_FLEET_URL=…` | Fleet server URL — fleetd MSIs built since September 2026 configure orbit through the service's environment block. Checked first. |
+| `Environment` value: `ORBIT_ROOT_DIR=…` | Orbit root directory — used to locate `identifier` |
+| `ImagePath` value: `--fleet-url "…"` | Fleet server URL — earlier fleetd MSIs passed it as a command-line argument. Hosts enrolled with those keep this form across orbit's self-updates. |
+| `ImagePath` value: `--root-dir "…"` | Orbit root directory, same vintage |
 | `<root-dir>\identifier` | Device authentication token (rotates hourly) |
+
+A scheme-less value such as `fleet.example.com:8080` is treated as HTTPS, matching orbit. If no URL is found, or it isn't a valid HTTPS URL, the app displays an error naming the source it looked in and quits.
 
 > **Note:** Fleet Desktop requires fleetd to be installed and enrolled. The MSI refuses to install if `C:\Program Files\Orbit\bin\orbit\orbit.exe` is missing.
 
@@ -186,8 +243,10 @@ Start-Process "fleet://refetch"
 
 | Flag | Purpose |
 |------|---------|
-| `--hidden` (or `--minimized` / `/hidden`) | Start without showing the window. Used for autostart-on-login scenarios. The window appears when the user clicks the taskbar icon or a `fleet://` URL is opened. |
+| `--hidden` (or `--minimized` / `/hidden`) | Start without showing the window, but preload the page so the first open is instant. Used for autostart-on-login scenarios. The window appears when the user clicks the taskbar icon or a `fleet://` URL is opened. |
 | `fleet://<host>` | Open directly to the given page. (Set automatically by Windows when handling a URL scheme.) |
+| `notify --url <https url>` | Show an end-user notification toast; see [Notifications](#notifications). |
+| `help` / `--help` | Print usage. |
 
 ## CI/CD
 
@@ -198,19 +257,20 @@ There are two GitHub Actions workflows:
 Runs on every push to `main` and on pull requests (doc-only changes are skipped). This is a compile-and-package check only — it uses **no secrets**, so it also passes on pull requests from forks:
 
 1. Restores .NET dependencies (the WiX toolset comes with the wixproj's PackageReferences)
-2. Publishes a self-contained, single-file EXE
-3. Builds the MSI
-4. Uploads the **unsigned** MSI as a workflow artifact (retained for 30 days)
+2. Publishes a self-contained, single-file EXE — once per architecture (x64 and ARM64), in a matrix
+3. Builds the MSI for that architecture
+4. Runs `dev-notify-smoke.ps1` against the x64 build to assert the `notify` exit-code contract
+5. Uploads the **unsigned** MSIs as workflow artifacts (retained for 30 days)
 
 ### Build and Release (`.github/workflows/build-and-release.yml`)
 
-Triggered by pushing a `v*` tag or manually via `workflow_dispatch`. Signing credentials are injected only here: the EXE and MSI are Authenticode-signed (if secrets are configured), then a GitHub Release is created with the MSI attached.
+Triggered by pushing a `v*` tag or manually via `workflow_dispatch`. Signing credentials are injected only here: the EXEs and MSIs for both architectures are Authenticode-signed (if secrets are configured), then a GitHub Release is created with both MSIs attached.
 
 All third-party GitHub Actions in both workflows are pinned to commit SHAs (tags kept as comments) so a moved tag upstream can't silently change what runs in CI.
 
 ### Releasing a new version
 
-1. Update `<Version>` in `FleetDesktop/FleetDesktop.csproj`
+1. Update `<Version>` in `FleetDesktop/FleetDesktop.csproj` (and `assemblyIdentity` in `app.manifest`), and add an entry to `CHANGELOG.md`
 2. Push to `main` (the Build workflow runs automatically to verify)
 3. Go to **Actions → Build and Release → Run workflow** to create a GitHub Release
 

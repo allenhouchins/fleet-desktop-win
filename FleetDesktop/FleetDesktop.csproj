@@ -11,19 +11,35 @@
     <AssemblyName>FleetDesktop</AssemblyName>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.1.0</Version>
-    <FileVersion>1.1.0.0</FileVersion>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <Version>1.2.0</Version>
+    <FileVersion>1.2.0.0</FileVersion>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
     <Product>Fleet Desktop</Product>
     <Company>Fleet Device Management</Company>
     <Copyright>Copyright © Fleet Device Management</Copyright>
     <Description>Fleet Desktop self-service portal for Windows.</Description>
 
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- x64 and ARM64 Windows are both supported (fleetd ships for both, and the
+         macOS app is universal). build.ps1 passes the runtime; a plain `dotnet run`
+         gets x64. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+
+    <!-- Native libraries (WPF's, WebView2Loader) are installed next to the EXE in
+         Program Files rather than extracted to the user's %TEMP% on every launch:
+         nothing is loaded from a user-writable directory, and startup skips the
+         extraction. -->
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <!-- Uncompressed, so assemblies are memory-mapped from disk and shared, rather
+         than inflated into private memory at every launch. The MSI's cabinet
+         compresses the download anyway. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <!-- Precompiled for faster startup. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- The UI is Fleet's web page; WPF's own localized resources are dead weight. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 

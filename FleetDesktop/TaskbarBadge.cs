@@ -12,7 +12,23 @@ namespace FleetDesktop;
 /// </summary>
 internal static class TaskbarBadge
 {
+    private static readonly Color BadgeRed = Color.FromRgb(0xE5, 0x39, 0x2A);
+
+    // The badge is re-applied on every poll (so it survives an Explorer restart), but
+    // the count rarely changes — reuse the last bitmap rather than rasterizing a new
+    // one each minute. UI thread only.
+    private static int _cachedCount = -1;
+    private static ImageSource? _cached;
+
     public static ImageSource Create(int count)
+    {
+        if (count == _cachedCount && _cached != null) return _cached;
+        _cached = Render(count);
+        _cachedCount = count;
+        return _cached;
+    }
+
+    private static ImageSource Render(int count)
     {
         const int size = 16;
         var text = count > 99 ? "99+" : count.ToString(CultureInfo.InvariantCulture);
@@ -31,15 +47,14 @@ internal static class TaskbarBadge
                 size / 2.0);
 
             // Red fill on top of the border.
-            var red = (Color)ColorConverter.ConvertFromString("#E5392A");
             dc.DrawEllipse(
-                new SolidColorBrush(red),
+                new SolidColorBrush(BadgeRed),
                 null,
                 center,
                 (size / 2.0) - 1,
                 (size / 2.0) - 1);
 
-            // Pick a font size that fits — text up to 3 chars ("99+") at 9pt fits inside a 16px circle.
+            // Pick a font size that fits — text up to 3 chars ("99+") at 7pt fits inside a 16px circle.
             var fontSize = text.Length switch
             {
                 1 => 11.0,

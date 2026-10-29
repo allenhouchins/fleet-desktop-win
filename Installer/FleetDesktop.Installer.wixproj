@@ -1,19 +1,22 @@
-<Project Sdk="WixToolset.Sdk/4.0.5">
+<Project Sdk="WixToolset.Sdk/5.0.2">
 
   <PropertyGroup>
-    <OutputName>fleet_desktop-v$(Version)</OutputName>
+    <!-- One MSI per architecture: fleet_desktop-v1.2.0-x64.msi, fleet_desktop-v1.2.0-arm64.msi.
+         build.ps1 sets Platform from the runtime it published. -->
+    <Platforms>x64;arm64</Platforms>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <InstallerPlatform>$(Platform)</InstallerPlatform>
+    <OutputName>fleet_desktop-v$(Version)-$(Platform)</OutputName>
     <OutputType>Package</OutputType>
-    <Platforms>x64</Platforms>
-    <Platform>x64</Platform>
     <SuppressIces>ICE61</SuppressIces>
 
     <!--
       PublishDir is set by the build script and points at FleetDesktop's
-      self-contained, single-file publish output:
+      self-contained, single-file publish output for the matching runtime:
           ..\FleetDesktop\bin\Release\net8.0-windows\win-x64\publish\
-      The .wxs file picks it up via $(var.PublishDir).
+      The .wxs file picks it up via $(var.PublishDir) and harvests every file in it.
     -->
-    <PublishDir Condition="'$(PublishDir)' == ''">..\FleetDesktop\bin\$(Configuration)\net8.0-windows\win-x64\publish\</PublishDir>
+    <PublishDir Condition="'$(PublishDir)' == ''">..\FleetDesktop\bin\$(Configuration)\net8.0-windows\win-$(Platform)\publish\</PublishDir>
 
     <!-- Version is plumbed in by CI from FleetDesktop.csproj. -->
     <Version Condition="'$(Version)' == ''">1.0.0</Version>
@@ -22,8 +25,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="WixToolset.Util.wixext" Version="4.0.5" />
-    <PackageReference Include="WixToolset.UI.wixext" Version="4.0.5" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
   </ItemGroup>
 
 </Project>

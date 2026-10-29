@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   release:
-    name: Build and Release MSI
+    name: Build and Release MSIs
     runs-on: windows-latest
 
     steps:
@@ -45,9 +45,9 @@ jobs:
       # Signing credentials live only in this workflow — the per-push Build
       # workflow compiles without secrets so it stays fork-safe. sign.ps1
       # auto-detects Azure Trusted Signing first, then PFX; with neither
-      # configured the MSI is released unsigned.
-      - name: Build and sign MSI
-        id: build
+      # configured the MSIs are released unsigned.
+      - name: Build and sign x64 MSI
+        id: build_x64
         shell: pwsh
         env:
           AZURE_TS_ENDPOINT: ${{ secrets.AZURE_TS_ENDPOINT }}
@@ -58,13 +58,29 @@ jobs:
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
           WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
-        run: .\build.ps1 -Configuration Release
+        run: .\build.ps1 -Configuration Release -Runtime win-x64
 
-      - name: Upload MSI artifact
+      - name: Build and sign ARM64 MSI
+        id: build_arm64
+        shell: pwsh
+        env:
+          AZURE_TS_ENDPOINT: ${{ secrets.AZURE_TS_ENDPOINT }}
+          AZURE_TS_ACCOUNT: ${{ secrets.AZURE_TS_ACCOUNT }}
+          AZURE_TS_PROFILE: ${{ secrets.AZURE_TS_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: .\build.ps1 -Configuration Release -Runtime win-arm64
+
+      - name: Upload MSI artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fleet-desktop-msi-v${{ steps.build.outputs.VERSION }}
-          path: ${{ steps.build.outputs.MSI_PATH }}
+          name: fleet-desktop-msi-v${{ steps.build_x64.outputs.VERSION }}
+          path: |
+            ${{ steps.build_x64.outputs.MSI_PATH }}
+            ${{ steps.build_arm64.outputs.MSI_PATH }}
           if-no-files-found: error
           retention-days: 90
 
@@ -75,7 +91,7 @@ jobs:
           if ($env:GITHUB_REF -like "refs/tags/*") {
             $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
           } else {
-            $tag = "v${{ steps.build.outputs.VERSION }}"
+            $tag = "v${{ steps.build_x64.outputs.VERSION }}"
           }
           Write-Host "Tag: $tag"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "TAG=$tag"
@@ -83,7 +99,8 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MSI_PATH: ${{ steps.build.outputs.MSI_PATH }}
+          MSI_X64: ${{ steps.build_x64.outputs.MSI_PATH }}
+          MSI_ARM64: ${{ steps.build_arm64.outputs.MSI_PATH }}
           TAG: ${{ steps.tag.outputs.TAG }}
           DRAFT: ${{ inputs.draft }}
           PRERELEASE: ${{ inputs.prerelease }}
@@ -91,7 +108,7 @@ jobs:
         run: |
           $args = @(
             "release", "create", $env:TAG,
-            $env:MSI_PATH,
+            $env:MSI_X64, $env:MSI_ARM64,
             "--title", "Fleet Desktop $env:TAG",
             "--generate-notes"
           )

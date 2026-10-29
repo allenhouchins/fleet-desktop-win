@@ -4,7 +4,7 @@
 #        WINDOWS_PFX_BASE64
 #        WINDOWS_PFX_PASSWORD
 #
-#   2. Azure Trusted Signing — supplied via env vars:
+#   2. Azure Trusted Signing - supplied via env vars:
 #        AZURE_TS_ENDPOINT          (e.g. https://eus.codesigning.azure.net/)
 #        AZURE_TS_ACCOUNT
 #        AZURE_TS_PROFILE
@@ -130,5 +130,5 @@ if ($env:WINDOWS_PFX_BASE64 -and $env:WINDOWS_PFX_PASSWORD) {
     exit 0
 }
 
-Write-Host "    No signing credentials configured — skipping." -ForegroundColor Yellow
+Write-Host "    No signing credentials configured - skipping." -ForegroundColor Yellow
 exit 0

@@ -101,9 +101,8 @@ internal sealed class SingleInstance : IDisposable
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
                 await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
-                using var reader = new StreamReader(server, Encoding.UTF8);
-                var message = (await reader.ReadToEndAsync(ct).ConfigureAwait(false)).Trim();
-                if (message.Length > 0)
+                var message = (await ReadBoundedAsync(server, ct).ConfigureAwait(false))?.Trim();
+                if (!string.IsNullOrEmpty(message))
                 {
                     OnMessageReceived?.Invoke(message);
                 }
@@ -126,6 +125,26 @@ internal sealed class SingleInstance : IDisposable
                 }
             }
         }
+    }
+
+    /// <summary>Longest message accepted from a peer. A fleet:// URL is a few dozen
+    /// bytes; the cap keeps a misbehaving same-user process from making the primary
+    /// buffer an unbounded stream.</summary>
+    private const int MaxMessageBytes = 8 * 1024;
+
+    /// <summary>Reads the whole message, or null if it exceeds <see cref="MaxMessageBytes"/>.</summary>
+    private static async Task<string?> ReadBoundedAsync(Stream stream, CancellationToken ct)
+    {
+        var buffer = new byte[MaxMessageBytes + 1];
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct).ConfigureAwait(false);
+            if (read <= 0) break;
+            total += read;
+        }
+        if (total > MaxMessageBytes) return null;
+        return Encoding.UTF8.GetString(buffer, 0, total);
     }
 
     private void TryForwardMessage(string message)
