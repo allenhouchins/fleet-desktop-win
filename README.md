@@ -2,7 +2,7 @@
 
 Fleet Desktop is a native Windows application that provides end users with a self-service portal for [Fleet](https://fleetdm.com). It integrates with Fleet's [orbit](https://fleetdm.com/docs/get-started/anatomy#orbit) agent (fleetd) to give users direct access to device management features without needing to open a browser.
 
-This is the Windows companion to the [macOS version](https://github.com/allenhouchins/fleet-desktop) and follows the same principles and use cases.
+This is the Windows companion to the macOS version and follows the same principles and use cases.
 
 ## Features
 
